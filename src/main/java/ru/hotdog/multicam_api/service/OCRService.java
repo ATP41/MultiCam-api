@@ -22,11 +22,16 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Service
 @Slf4j
 public class OCRService {
+    private static final Set<String> KNOWN_CATEGORIES = Set.of(
+            "physics", "chemistry", "math", "mixed", "text", "food", "objects", "image", "noise"
+    );
+
     private static final String SYSTEM_PROMPT = """
             You are a precise visual analysis engine. Obey these rules without exception:
             1. ACCURACY FIRST: Only report what you can see with certainty. If unsure — omit, never guess.
@@ -321,7 +326,7 @@ public class OCRService {
         log.info("[PIPELINE-START] Получен запрос на обработку. Размер изображения: {} байт", imageBytes.length);
 
         return sendToVllm(imageBytes, CLASSIFIER_PROMPT, 32)
-                .map(this::normalizeCategory)
+                .map(OCRService::normalizeCategory)
                 .flatMap(category -> categoryRouter(imageBytes, category))
                 .onErrorResume(ex -> {
                     log.error("[PIPELINE-ERROR] Критическая ошибка на верхнем уровне пайплайна: {}", ex.getMessage(), ex);
@@ -336,7 +341,7 @@ public class OCRService {
         return switch (category) {
             case "math", "mixed" -> handleMath(imageBytes);
             case "physics" -> handlePhysics(imageBytes);
-            case "chemistry" -> handeleChemistry(imageBytes);
+            case "chemistry" -> handleChemistry(imageBytes);
             case "text" -> handleText(imageBytes);
             case "food" -> handleFood(imageBytes);
             case "objects" -> handleObjs(imageBytes);
@@ -374,13 +379,13 @@ public class OCRService {
                 });
     }
 
-    private Mono<OCRResponse> handeleChemistry(byte[] imageBytes) {
+    private Mono<OCRResponse> handleChemistry(byte[] imageBytes) {
         log.info("[HANDLER-CHEMISTRY] Старт обработки запроса");
         return scienceSolver(imageBytes, CHEMISTRY_PROMPT, 8192)
                 .map(res -> {
                     log.debug("[HANDLER-CHEMISTRY] Распознанная задача:\n{}", res);
                     OCRResponse response = new OCRResponse();
-                    response.setTag("сhemistry");
+                    response.setTag("chemistry");
                     response.setResult(res);
                     log.info("[HANDLER-CHEMISTRY] Обработка успешно завершена");
                     return response;
@@ -561,7 +566,7 @@ public class OCRService {
         log.debug("[gemini-3.1-flash-lite] Изображение конвертировано в Base64. Длина строки: {}", base64Image.length());
 
         Map<String, Object> requestBody = Map.of(
-                "model", localModel.trim(),
+                "model", deepSeekModel.trim(),
                 "messages", List.of(
                         Map.of("role", "user", "content", List.of(
                                 Map.of("type", "text", "text", prompt),
@@ -573,7 +578,7 @@ public class OCRService {
         );
         log.info("[gemini-3.1-flash-lite] Отправка POST /v1/chat/completions");
         long startTime = System.currentTimeMillis();
-        return localWebClient.post()
+        return deepSeekWebClient.post()
                 .uri("/chat/completions")
                 .contentType(MediaType.APPLICATION_JSON)
                 .header("Authorization", "Bearer " + deepSeekApiKey)
@@ -644,12 +649,22 @@ public class OCRService {
         return cleaned;
     }
 
-    private String normalizeCategory(String raw) {
+    static String normalizeCategory(String raw) {
         log.debug("[UTILS] Вызов normalizeCategory. Исходная строка: '{}'", raw);
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+
         String clean = raw.toLowerCase().trim().replaceAll("[^a-z]", " ");
-        if (clean.contains("math") || clean.contains("mixed")) return clean.contains("mixed") ? "mixed" : "math";
-        if (clean.contains("physics")) return "physics";
-        if (clean.contains("chemistry")) return "chemistry";
+        List<String> words = List.of(clean.trim().split("\\s+"));
+        if (words.size() == 1 && KNOWN_CATEGORIES.contains(words.get(0))) {
+            return words.get(0);
+        }
+
+        if (words.contains("physics")) return "physics";
+        if (words.contains("chemistry")) return "chemistry";
+        if (words.contains("mixed")) return "mixed";
+        if (words.contains("math")) return "math";
         if (clean.contains("food") || clean.contains("meal")) return "food";
         if (clean.contains("noise") || clean.contains("empty") || clean.contains("background")) return "noise";
         if (clean.contains("object") || clean.contains("product")) return "objects";
